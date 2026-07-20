@@ -46,8 +46,15 @@ final class CoreTextGlyphRasterizer {
             context.setShouldSubpixelPositionFonts(true)
             context.setAllowsFontSubpixelQuantization(false)
             context.setShouldSubpixelQuantizeFonts(false)
-            context.setAllowsFontSmoothing(true)
-            context.setShouldSmoothFonts(true)
+            // Grayscale antialiasing only — font smoothing renders glyph
+            // edges with per-channel (subpixel) differences, which trips the
+            // r/g/b-equality color-glyph detector below: every text glyph
+            // classifies as a COLOR glyph, lands in the color atlas, and is
+            // drawn as its rasterized (white) bitmap with the terminal's
+            // foreground color ignored. Invisible on dark themes (white text
+            // looks right), fatal on light ones (white-on-white).
+            context.setAllowsFontSmoothing(false)
+            context.setShouldSmoothFonts(false)
 
             context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
             context.setStrokeColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
