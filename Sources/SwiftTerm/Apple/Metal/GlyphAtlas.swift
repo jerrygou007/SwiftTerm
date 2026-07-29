@@ -182,6 +182,16 @@ final class GlyphAtlas {
         nextY = 0
         rowHeight = 0
         data = Array(repeating: UInt8(0), count: size * size * bytesPerPixel)
+        // Allocate a fresh texture rather than clearing the current one in
+        // place: with several frames in flight, an already-submitted frame may
+        // still be sampling the old texture, and blanking it under the GPU
+        // would flash empty glyphs for that frame. The old texture stays alive
+        // until its command buffer completes, and new glyphs rasterize into
+        // this one. Falls back to clearing in place if allocation fails.
+        if let replacement = GlyphAtlas.makeTexture(device: device, size: size, format: format) {
+            texture = replacement
+            return
+        }
         data.withUnsafeBytes { raw in
             texture.replace(region: MTLRegionMake2D(0, 0, size, size),
                             mipmapLevel: 0,

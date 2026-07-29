@@ -208,7 +208,20 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     private var atlasResetHandled = false
     private var cursorBlinkTimer: Timer?
     private var cursorBlinkOn = true
-    private let frameSemaphore = DispatchSemaphore(value: 1)
+    /// Frames the CPU may have in flight, matching CAMetalLayer's default
+    /// drawable count. With a single permit the CPU had to wait for the GPU to
+    /// finish the previous frame, and `draw(in:)` *drops* a frame whose permit
+    /// isn't immediately available — so continuous motion (a scroll drag,
+    /// inertia, fast output) rendered at roughly every other display refresh
+    /// and looked like stutter. Three permits let the CPU stay a frame or two
+    /// ahead, which is what keeps the cadence even.
+    ///
+    /// Safe with the existing buffer lifetimes: pooled per-frame buffers are
+    /// only recycled from the command buffer's completion handler, and the
+    /// per-row persistent cache allocates a fresh buffer whenever a row is
+    /// rebuilt, so nothing the GPU is still reading is ever overwritten.
+    private static let maxFramesInFlight = 3
+    private let frameSemaphore = DispatchSemaphore(value: MetalTerminalRenderer.maxFramesInFlight)
     private var pendingRedraw = false
     private let redrawLock = NSLock()
 #if DEBUG
