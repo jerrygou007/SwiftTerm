@@ -220,6 +220,15 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     /// only recycled from the command buffer's completion handler, and the
     /// per-row persistent cache allocates a fresh buffer whenever a row is
     /// rebuilt, so nothing the GPU is still reading is ever overwritten.
+    /// Sub-row scroll offset in pixels for the current frame: how far the top
+    /// visible row is scrolled above the viewport's top edge. Row geometry is
+    /// built on whole-row boundaries, so without this the rendered image only
+    /// changed when the viewport crossed a full line — a finger dragging
+    /// smoothly produced one-line jumps. Handed to the vertex shaders as a
+    /// translation so the same cached row buffers can be drawn at any
+    /// fractional position, with no re-shaping.
+    private var frameTranslation = SIMD2<Float>(0, 0)
+
     private static let maxFramesInFlight = 3
     private let frameSemaphore = DispatchSemaphore(value: MetalTerminalRenderer.maxFramesInFlight)
     private var pendingRedraw = false
@@ -493,6 +502,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                 encoder.setVertexBuffer(buffer, offset: 0, index: 0)
                 var viewportVar = viewport
                 encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+                var translationVar = frameTranslation
+                encoder.setVertexBytes(&translationVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: drawData.cursorColorVertices.count)
             }
         }
@@ -503,6 +514,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                 encoder.setVertexBuffer(buffer, offset: 0, index: 0)
                 var viewportVar = viewport
                 encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+                var translationVar = frameTranslation
+                encoder.setVertexBytes(&translationVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
                 encoder.setFragmentTexture(grayscaleAtlas.texture, index: 0)
                 encoder.setFragmentSamplerState(sampler, index: 0)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: drawData.cursorGlyphVerticesGray.count)
@@ -515,6 +528,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                 encoder.setVertexBuffer(buffer, offset: 0, index: 0)
                 var viewportVar = viewport
                 encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+                var translationVar = frameTranslation
+                encoder.setVertexBytes(&translationVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
                 encoder.setFragmentTexture(colorAtlas.texture, index: 0)
                 encoder.setFragmentSamplerState(sampler, index: 0)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: drawData.cursorGlyphVerticesColor.count)
@@ -579,7 +594,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         let viewWidthPx = terminalView.bounds.width * scale
 
         let rowInfo = visibleRowRange(buffer: buffer, cellHeight: cellHeight, terminalView: terminalView)
-        guard let (firstRow, lastRow, visibleDisp) = rowInfo else {
+        guard let (firstRow, lastRow, visibleDisp, subRowOffset) = rowInfo else {
+            frameTranslation = SIMD2<Float>(0, 0)
 #if DEBUG
             debugRowsRebuilt = 0
             debugRowsCached = 0
@@ -590,6 +606,9 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                             cursorGlyphVerticesGray: [],
                             cursorGlyphVerticesColor: [])
         }
+        // Rows are positioned bottom-up, so scrolling the viewport down by a
+        // fraction of a row shifts their pixels up by the same amount.
+        frameTranslation = SIMD2<Float>(0, Float(subRowOffset * scale))
         let bufferingMode = terminalView.metalBufferingMode
         if cacheBufferingMode != bufferingMode {
             if bufferingMode == .perFrameAggregated {
@@ -779,9 +798,13 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         return lower...upper
     }
 
+    /// Visible rows plus the sub-row remainder (points) of the scroll position.
+    /// The remainder is what the caller turns into the shader translation; row
+    /// geometry itself stays on whole-row boundaries so cached row buffers keep
+    /// their meaning.
     private func visibleRowRange(buffer: Buffer,
                                  cellHeight: CGFloat,
-                                 terminalView: TerminalView) -> (Int, Int, Int)? {
+                                 terminalView: TerminalView) -> (Int, Int, Int, CGFloat)? {
         guard buffer.lines.count > 0 else {
             return nil
         }
@@ -794,19 +817,23 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         let maxOffset = max(0, contentHeight - viewHeight)
         let offsetY = min(max(0, terminalView.contentOffset.y), maxOffset)
         let firstRow = max(0, Int(floor(offsetY / cellHeight)))
+        // Whole rows are addressed by `firstRow`; this is the leftover
+        // fraction of a row the viewport is scrolled past.
+        let subRow = offsetY - CGFloat(firstRow) * cellHeight
         let lastRow = min(buffer.lines.count - 1,
                           Int(floor((offsetY + viewHeight - 1) / cellHeight)))
         if firstRow > lastRow {
             return nil
         }
-        return (firstRow, lastRow, firstRow)
+        return (firstRow, lastRow, firstRow, subRow)
         #else
+        // macOS scrolls by whole rows through yDisp, so there is no remainder.
         let firstRow = buffer.yDisp
         let lastRow = min(buffer.lines.count - 1, buffer.yDisp + buffer.rows - 1)
         if firstRow > lastRow {
             return nil
         }
-        return (firstRow, lastRow, buffer.yDisp)
+        return (firstRow, lastRow, buffer.yDisp, 0)
         #endif
     }
 
@@ -1935,6 +1962,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         encoder.setVertexBuffer(buffer, offset: 0, index: 0)
         var viewportVar = viewport
         encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+                var translationVar = frameTranslation
+                encoder.setVertexBytes(&translationVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
         if let texture {
             encoder.setFragmentTexture(texture, index: 0)
             encoder.setFragmentSamplerState(sampler, index: 0)
@@ -1982,6 +2011,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         encoder.setFragmentSamplerState(sampler, index: 0)
         var viewportVar = viewport
         encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+                var translationVar = frameTranslation
+                encoder.setVertexBytes(&translationVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
         for draw in draws {
             guard let buffer = makeBuffer(draw.vertices) else {
                 continue
@@ -2012,6 +2043,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         encoder.setRenderPipelineState(pipeline)
         var viewportVar = viewport
         encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+                var translationVar = frameTranslation
+                encoder.setVertexBytes(&translationVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
         if let texture {
             encoder.setFragmentTexture(texture, index: 0)
             encoder.setFragmentSamplerState(sampler, index: 0)
@@ -2047,6 +2080,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         encoder.setFragmentSamplerState(sampler, index: 0)
         var viewportVar = viewport
         encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+                var translationVar = frameTranslation
+                encoder.setVertexBytes(&translationVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
         for row in rows {
             for draw in row[keyPath: imageKey] {
                 encoder.setVertexBuffer(draw.buffer, offset: 0, index: 0)
