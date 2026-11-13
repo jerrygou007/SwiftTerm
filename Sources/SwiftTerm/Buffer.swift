@@ -515,7 +515,9 @@ public final class Buffer {
             }
         }
         
-        // DEBUG: Post-condition
+        // Post-condition, debug builds only: a release build walked every line of
+        // the scrollback on each resize just to assert on it.
+        #if DEBUG
         if lines.count > 0 {
             // lines.count, not lines.maxLength: checking every capacity slot would
             // materialize blank lines for the whole scrollback on every resize and,
@@ -529,6 +531,7 @@ public final class Buffer {
                 }
             }
         }
+        #endif
         rows = newRows
         cols = newCols
     }
